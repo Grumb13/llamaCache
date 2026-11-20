@@ -127,8 +127,12 @@ async def _handle_chat(request: Request, path: str):
         return JSONResponse({"error": {"message": str(exc), "type": "slot_timeout"}},
                             status_code=503)
 
-    # pin the request to the allocated slot
-    body["id_slot"] = alloc.slot_id
+    # pin the request to the allocated slot. A bypass allocation (model was
+    # not resident) carries no slot: the router/llama-swap picks one itself
+    # on the forwarded request, and there is nothing to save afterwards —
+    # the session re-warms on its next request via normal allocation.
+    if alloc.slot_id is not None:
+        body["id_slot"] = alloc.slot_id
     headers = _forward_headers(request)
     stream = bool(body.get("stream"))
 
@@ -141,7 +145,7 @@ async def _handle_chat(request: Request, path: str):
             raise
         finally:
             proxy.slots.release(model, fe, sess)
-        if status_code == 200 and proxy.save_after_request:
+        if status_code == 200 and proxy.save_after_request and alloc.slot_id is not None:
             _schedule_save(proxy, model, alloc.slot_id, fe, sess)
         return JSONResponse(data, status_code=status_code)
 
@@ -164,7 +168,7 @@ async def _handle_chat(request: Request, path: str):
             yield f"data: {payload}\n\n".encode()
         finally:
             proxy.slots.release(model, fe, sess)
-            if status_code == 200 and proxy.save_after_request:
+            if status_code == 200 and proxy.save_after_request and alloc.slot_id is not None:
                 _schedule_save(proxy, model, alloc.slot_id, fe, sess)
 
     return StreamingResponse(

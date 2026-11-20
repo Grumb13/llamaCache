@@ -33,7 +33,7 @@ class SlotInfo:
 
 @dataclass
 class Allocation:
-    slot_id: int
+    slot_id: int | None  # None = bypass (model not resident; forward loads it)
     restored: bool = False
     evicted: tuple[str, str] | None = None  # (frontend, session) pushed out
 
@@ -176,6 +176,25 @@ class SlotManager:
 
         async with self._lock:
             while True:
+                # 0. model not resident: there is no slot state to allocate —
+                #    the chat forward itself makes llama-swap/the router load
+                #    the model (evicting whatever is resident, per its own
+                #    policy). Waiting here would deadlock: GET /slots against
+                #    an unloaded model fails (500), so no slot can ever
+                #    "free up". Bypass and let the load happen; when the
+                #    model is resident again, normal allocation (with disk
+                #    restore) resumes. Skipped when residency is unknown
+                #    (poll failed) so transient /models errors keep the old
+                #    behaviour.
+                resident = await self.client.is_resident(model)
+                if resident is False:
+                    log.info(
+                        "model %s is not resident; bypassing slot allocation "
+                        "for %s/%s — the forward will trigger the load",
+                        model, frontend, session,
+                    )
+                    return Allocation(slot_id=None, restored=False)
+
                 slots = await self.refresh(model)
                 resident = self._resident.setdefault(model, {})
 
@@ -243,6 +262,22 @@ class SlotManager:
 
     # ------------------------------------------------------- save / restore
 
+    def _staged_path(self, model: str, filename: str) -> Path:
+        """Where llama-server writes/reads a slot save file for `model`.
+
+        Plain/direct mode: the single llama-server writes into slot_save_path.
+        Router mode: each child has its own --slot-save-path (llama-models.ini
+        `slot-save-path`), expected to be `<slot_save_path>/<model>` — kv-proxy
+        stages restores and collects saves per child there, so blobs never
+        cross children and filenames never collide.
+        """
+        if self.client.router_upstream:
+            d = self.slot_save_path / model
+        else:
+            d = self.slot_save_path
+        d.mkdir(parents=True, exist_ok=True)
+        return d / filename
+
     async def _restore_into(self, model: str, slot_id: int,
                             frontend: str, session: str) -> bool:
         entry = self.store.get(frontend, session, model)
@@ -250,7 +285,7 @@ class SlotManager:
             return False
         filename = f"kv-{frontend}-{session}.bin"
         # the blob must be inside llama.cpp's --slot-save-path to be restorable
-        staged = self.slot_save_path / filename
+        staged = self._staged_path(model, filename)
         try:
             import shutil
             if not staged.exists():
@@ -270,7 +305,7 @@ class SlotManager:
         filename = f"kv-{frontend}-{session}.bin"
         try:
             result = await self.client.save_slot(model, slot_id, filename)
-            staged = self.slot_save_path / filename
+            staged = self._staged_path(model, filename)
             if staged.exists():
                 self.store.finalize(frontend, session, model, staged,
                                     n_saved=int(result.get("n_saved", 0)))
@@ -287,7 +322,7 @@ class SlotManager:
         filename = f"kv-{frontend}-{session}.bin"
         try:
             result = await self.client.save_slot(model, slot_id, filename)
-            staged = self.slot_save_path / filename
+            staged = self._staged_path(model, filename)
             if staged.exists():
                 self.store.finalize(frontend, session, model, staged,
                                     n_saved=int(result.get("n_saved", 0)))

@@ -36,6 +36,9 @@ def build_app(config: Config | None = None):
     client = LlamaClient(
         cfg.llama_swap_url, cfg.direct_upstream,
         direct_llama_server=cfg.direct_llama_server,
+        router_upstream=cfg.router_upstream,
+        router_url=cfg.router_url,
+        upstream_api_key=cfg.upstream_api_key,
     )
     store = CacheStore(cfg.cache_dir, cfg.max_cache_size)
     slots = SlotManager(

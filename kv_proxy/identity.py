@@ -5,8 +5,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# Custom header that lets any frontend pin its own session id explicitly.
+# Custom headers that let a frontend pin its own session id explicitly.
+# x-kv-session is kv-proxy's own header; x-hermes-session-id is what Hermes
+# sends as its session_affinity_header and what llama-server's
+# --slot-save-sessions is keyed on.
 SESSION_HEADER = "x-kv-session"
+HERMES_SESSION_HEADER = "x-hermes-session-id"
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -45,7 +49,8 @@ def resolve_identity(
 
     Frontend: the first configured API key present in Authorization wins
     (Bearer or raw); otherwise "default".
-    Session: X-KV-Session header, else body "user" field, else "default".
+    Session: X-KV-Session header, else x-hermes-session-id, else body "user"
+    field, else "default".
     """
     frontend = "default"
     auth = headers.get("authorization", "")
@@ -57,6 +62,8 @@ def resolve_identity(
                 break
 
     session_raw = headers.get(SESSION_HEADER, "")
+    if not session_raw:
+        session_raw = headers.get(HERMES_SESSION_HEADER, "")
     if not session_raw and isinstance(body, dict):
         user = body.get("user")
         session_raw = str(user) if user else ""

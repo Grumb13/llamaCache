@@ -47,6 +47,16 @@ class Config:
     save_after_request: bool = True
     direct_llama_server: bool = False
     direct_upstream: dict[str, str] = field(default_factory=dict)
+    # Router mode: llama-swap's upstream entry hosts a llama-server router
+    # (--models-preset). Slot traffic then goes through
+    # /upstream/{router_upstream}/... with the *router-level* model name in the
+    # query/body, and model residency is polled from the router's /models.
+    router_upstream: str = ""
+    router_url: str = ""
+    # Bearer key for kv-proxy's own control-plane calls (slot ops via
+    # llama-swap /upstream and the direct router status poll). Client chat
+    # requests keep forwarding the client's own Authorization header.
+    upstream_api_key: str = ""
     keys: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -75,6 +85,19 @@ class Config:
             )
         if self.max_cache_size <= 0:
             raise ValueError("max_cache_size must be positive")
+        if self.router_upstream and self.direct_llama_server:
+            raise ValueError(
+                "router_upstream and direct_llama_server are mutually exclusive"
+            )
+        if self.router_url and not self.router_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"router_url must be an http(s) URL, got {self.router_url!r}"
+            )
+        if self.router_upstream and not self.router_url:
+            raise ValueError(
+                "router_url is required when router_upstream is set "
+                "(the router's model residency is polled there directly)"
+            )
 
 
 def _env(name: str) -> str | None:
@@ -125,6 +148,12 @@ def load_config(path: str | Path | None = None) -> Config:
         cfg.save_after_request = bool(v)
     if v := data.get("direct_llama_server"):
         cfg.direct_llama_server = bool(v)
+    if v := _env("KV_PROXY_ROUTER_UPSTREAM") or data.get("router_upstream"):
+        cfg.router_upstream = str(v)
+    if v := _env("KV_PROXY_ROUTER_URL") or data.get("router_url"):
+        cfg.router_url = str(v).rstrip("/")
+    if v := _env("KV_PROXY_UPSTREAM_API_KEY") or data.get("upstream_api_key"):
+        cfg.upstream_api_key = str(v)
 
     du = data.get("direct_upstream") or {}
     if isinstance(du, dict):
@@ -132,7 +161,19 @@ def load_config(path: str | Path | None = None) -> Config:
 
     keys = data.get("keys") or {}
     if isinstance(keys, dict):
-        cfg.keys = {str(k): str(val) for k, val in keys.items() if str(val)}
+        for k, val in keys.items():
+            val = str(val)
+            if not val:
+                continue
+            if val.startswith("env:"):
+                # avoid storing secrets in plaintext config.toml
+                env_val = os.environ.get(val[4:], "")
+                if not env_val:
+                    raise ValueError(
+                        f"keys.{k}: environment variable {val[4:]} is not set"
+                    )
+                val = env_val
+            cfg.keys[str(k)] = val
 
     cfg.validate()
     return cfg
