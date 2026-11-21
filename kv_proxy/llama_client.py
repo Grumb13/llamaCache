@@ -279,14 +279,17 @@ class LlamaClient:
                 return False
             if model:
                 # /upstream passthrough to the model's own health endpoint
-                r2 = await self._client.get(f"/upstream/{model}/health")
+                # (llama-swap protects /upstream with its apiKeys — send auth)
+                r2 = await self._client.get(
+                    f"/upstream/{model}/health", headers=self._auth_headers()
+                )
                 return r2.status_code == 200
             return True
         except httpx.HTTPError:
             return False
 
     async def get_models(self) -> Any:
-        r = await self._client.get("/v1/models")
+        r = await self._client.get("/v1/models", headers=self._auth_headers())
         return r.json() if r.status_code == 200 else {"data": []}
 
     # ---------------------------------------------------------- forwarding
